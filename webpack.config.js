@@ -16,6 +16,9 @@ module.exports = {
       }, {
         test: /\.wgsl$/,
         type: 'asset/source',
+      }, {
+        test: /\.vtk$/,
+        type: 'asset/source',
       }
     ],
   },

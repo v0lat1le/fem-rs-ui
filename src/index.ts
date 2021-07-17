@@ -1,28 +1,38 @@
-import { mat4 } from 'gl-matrix';
+import { mat4, vec3 } from 'gl-matrix';
 
 // 🟦 Shader
 import shaderCode from './shader.wgsl';
 
+import {load} from './io';
+const dataset = load();
 
 // Renderer
 // 📈 Position Vertex Buffer Data
-const positions = new Float32Array([1.0, -1.0, 0.0, -1.0, -1.0, 0.0, 0.0, 1.0, 0.0]);
+const positions = new Float32Array(dataset.points.flatMap((p) => p as number[]));
 
 // 🎨 Color Vertex Buffer Data
-const colors = new Float32Array([
-    1.0,
-    0.0,
-    0.0, // 🔴
-    0.0,
-    1.0,
-    0.0, // 🟢
-    0.0,
-    0.0,
-    1.0 // 🔵
-]);
+const colors = new Float32Array(dataset.point_data.flatMap((p) => p as number[]));
 
 // 🗄️ Index Buffer Data
-const indices = new Uint16Array([0, 1, 2]);
+const points = dataset.cells.flatMap((c) => {
+    return [
+        c.points[0], c.points[1], c.points[2],
+        c.points[0], c.points[2], c.points[3],
+        c.points[4], c.points[6], c.points[5],
+        c.points[4], c.points[7], c.points[6],
+
+        c.points[0], c.points[7], c.points[4],
+        c.points[0], c.points[3], c.points[7],
+        c.points[1], c.points[5], c.points[6],
+        c.points[1], c.points[6], c.points[2],
+
+        c.points[0], c.points[4], c.points[5],
+        c.points[0], c.points[5], c.points[1],
+        c.points[3], c.points[2], c.points[6],
+        c.points[3], c.points[6], c.points[7],
+    ]
+})
+const indices = new Uint16Array(points);
 
 class Renderer {
     canvas: HTMLCanvasElement;
@@ -52,8 +62,18 @@ class Renderer {
     commandEncoder: GPUCommandEncoder;
     passEncoder: GPURenderPassEncoder;
 
+    // junk
+    modelMat: mat4;
+    viewMat: mat4;
+    projMat: mat4;
+
     constructor(canvas: HTMLCanvasElement) {
         this.canvas = canvas;
+        this.modelMat = mat4.create();
+        mat4.fromTranslation(this.modelMat, [-0.5, -0.5, -0.5]);
+        this.viewMat = mat4.create();
+        mat4.lookAt(this.viewMat, [1, -2, 1], [0, 0, 0], [0, 0, 1]);
+        this.projMat = mat4.create();
     }
 
     // 🏎️ Start the rendering engine
@@ -109,7 +129,7 @@ class Renderer {
         this.positionBuffer = createBuffer(positions, GPUBufferUsage.VERTEX);
         this.colorBuffer = createBuffer(colors, GPUBufferUsage.VERTEX);
         this.indexBuffer = createBuffer(indices, GPUBufferUsage.INDEX);
-        this.viewMatrix = this.device.createBuffer({size: 16*4, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
+        this.viewMatrix = this.device.createBuffer({size: 256, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST});
 
         // 🖍️ Shaders
         const shaderDesc: GPUShaderModuleDescriptor = { code: shaderCode };
@@ -201,7 +221,7 @@ class Renderer {
         // 🟨 Rasterization
         const primitive: GPUPrimitiveState = {
             frontFace: 'cw',
-            cullMode: 'none',
+            cullMode: 'back',
             topology: 'triangle-list'
         };
 
@@ -241,6 +261,8 @@ class Renderer {
 
         this.depthTexture = this.device.createTexture(depthTextureDesc);
         this.depthTextureView = this.depthTexture.createView();
+
+        mat4.perspective(this.projMat, Math.PI/3, canvas.width/canvas.height, 0.1, 100);
     }
 
     // ✍️ Write commands to send to the GPU
@@ -264,19 +286,15 @@ class Renderer {
             depthStencilAttachment: depthAttachment
         };
 
-        const viewMat = mat4.create();
-        mat4.translate(viewMat, viewMat, [0, 0.5, 0]);
-        const upload = this.device.createBuffer({
-            size: 16 * 4,
-            usage: GPUBufferUsage.COPY_SRC,
-            mappedAtCreation: true
-        });
-        new Float32Array(upload.getMappedRange()).set(viewMat);
-        upload.unmap();
+        const mat = mat4.create();
+        mat4.multiply(mat, this.modelMat, mat);
+        mat4.multiply(mat, this.viewMat, mat);
+        mat4.multiply(mat, this.projMat, mat);
 
         this.commandEncoder = this.device.createCommandEncoder();
 
-        this.commandEncoder.copyBufferToBuffer(upload, 0, this.viewMatrix, 0, 16 * 4);
+        this.queue.writeBuffer(this.viewMatrix, 0, mat as BufferSource);
+        this.queue.writeBuffer(this.viewMatrix, 16*4, Float32Array.of(+(document.getElementById("scale") as HTMLInputElement).value));
 
         // 🖌️ Encode drawing commands
         this.passEncoder = this.commandEncoder.beginRenderPass(renderPassDesc);
@@ -287,10 +305,23 @@ class Renderer {
         this.passEncoder.setVertexBuffer(1, this.colorBuffer);
         this.passEncoder.setIndexBuffer(this.indexBuffer, 'uint16');
         this.passEncoder.setBindGroup(0, this.bindGroup);
-        this.passEncoder.drawIndexed(3, 1, 0, 0, 0);
+        this.passEncoder.drawIndexed(indices.length, 1, 0, 0, 0);
         this.passEncoder.endPass();
 
         this.queue.submit([this.commandEncoder.finish()]);
+    }
+
+    move(movementX: number, movementY: number) {
+        var mat = mat4.create();
+        mat4.fromTranslation(mat, [movementX/this.canvas.width, -movementY/this.canvas.height, 0]);
+        mat4.multiply(this.viewMat, mat, this.viewMat);
+    }
+
+    rotate(movementX: number, movementY: number) {
+        const axis = vec3.fromValues(movementY, movementX, 0);
+        var mat = mat4.create();
+        mat4.fromRotation(mat, 0.05, axis);
+        mat4.multiply(this.viewMat, mat, this.viewMat);
     }
 
     render = () => {
@@ -311,3 +342,21 @@ const canvas = document.getElementById('gfx') as HTMLCanvasElement;
 canvas.width = canvas.height = 640;
 const renderer = new Renderer(canvas);
 renderer.start();
+
+var dragging = false;
+canvas.onmousedown = (ev) => {
+    dragging = true;
+}
+canvas.onmouseup = (ev) => {
+    dragging = false;
+}
+canvas.onmousemove = (ev: MouseEvent) => {
+    if (!dragging) {
+        return;
+    }
+    if (ev.shiftKey) {
+        renderer.move(ev.movementX, ev.movementY);
+    } else {
+        renderer.rotate(ev.movementX, ev.movementY);
+    }
+}
